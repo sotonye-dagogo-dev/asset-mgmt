@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { verifyToken } from '@/lib/auth'
 import { createAuditLog } from '@/lib/audit'
 import { AuditAction } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 async function getUser(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
@@ -13,53 +17,61 @@ async function getUser(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const user = await getUser(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const user = await getUser(request)
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   
-  const { searchParams } = new URL(request.url)
-  const page = parseInt(searchParams.get('page') || '1')
-  const pageSize = parseInt(searchParams.get('pageSize') || '25')
-  const status = searchParams.get('status')
-  const category = searchParams.get('category')
-  const assignedToId = searchParams.get('assignedToId')
-  const search = searchParams.get('search')
+    const { searchParams } = new URL(request.url)
+    const page = parseInt(searchParams.get('page') || '1')
+    const pageSize = parseInt(searchParams.get('pageSize') || '25')
+    const status = searchParams.get('status')
+    const category = searchParams.get('category')
+    const assignedToId = searchParams.get('assignedToId')
+    const search = searchParams.get('search')
   
-  const where: Record<string, unknown> = {}
+    const where: Record<string, unknown> = {}
   
-  if (status) where.status = status
-  if (category) where.category = category
-  if (assignedToId) where.assignedToId = assignedToId
-  if (search) {
-    where.OR = [
-      { assetId: { contains: search, mode: 'insensitive' } },
-      { name: { contains: search, mode: 'insensitive' } },
-      { brand: { contains: search, mode: 'insensitive' } },
-      { model: { contains: search, mode: 'insensitive' } },
-      { serialNumber: { contains: search, mode: 'insensitive' } },
-    ]
+    if (status) where.status = status
+    if (category) where.category = category
+    if (assignedToId) where.assignedToId = assignedToId
+    if (search) {
+      where.OR = [
+        { assetId: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
+        { brand: { contains: search, mode: 'insensitive' } },
+        { model: { contains: search, mode: 'insensitive' } },
+        { serialNumber: { contains: search, mode: 'insensitive' } },
+      ]
+    }
+  
+    // Non-admins can only see their assigned assets
+    if (!['SUPERADMIN', 'ADMIN', 'IT_HEAD', 'IT_OFFICER', 'HR_HEAD', 'HR_OFFICER', 'COMPLIANCE_HEAD', 'COMPLIANCE_OFFICER'].includes(user.role)) {
+      where.assignedToId = user.id
+    }
+  
+    const [assets, total] = await Promise.all([
+      prisma.asset.findMany({
+        where,
+        include: {
+          assignedTo: { select: { id: true, firstName: true, lastName: true, email: true, department: true } },
+          assignedBy: { select: { id: true, firstName: true, lastName: true } },
+          accessories: { select: { id: true, assetId: true, name: true, accessoryId: true, status: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.asset.count({ where }),
+    ])
+  
+    return NextResponse.json({ assets, total, page, pageSize })
+  } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
+    console.error('GET ' + 'assets error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-  
-  // Non-admins can only see their assigned assets
-  if (!['SUPERADMIN', 'ADMIN', 'IT_HEAD', 'IT_OFFICER', 'HR_HEAD', 'HR_OFFICER', 'COMPLIANCE_HEAD', 'COMPLIANCE_OFFICER'].includes(user.role)) {
-    where.assignedToId = user.id
-  }
-  
-  const [assets, total] = await Promise.all([
-    prisma.asset.findMany({
-      where,
-      include: {
-        assignedTo: { select: { id: true, firstName: true, lastName: true, email: true, department: true } },
-        assignedBy: { select: { id: true, firstName: true, lastName: true } },
-        accessories: { select: { id: true, assetId: true, name: true, accessoryId: true, status: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-    prisma.asset.count({ where }),
-  ])
-  
-  return NextResponse.json({ assets, total, page, pageSize })
 }
 
 export async function POST(request: NextRequest) {
@@ -117,6 +129,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ asset }, { status: 201 })
   } catch (error) {
     console.error('Create asset error:', error)
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
