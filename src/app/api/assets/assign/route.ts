@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { verifyToken } from '@/lib/auth'
 import { createAuditLog } from '@/lib/audit'
 import { AuditAction } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 async function getUser(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
@@ -110,6 +114,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ asset: updatedAsset })
   } catch (error) {
     console.error('Assign asset error:', error)
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

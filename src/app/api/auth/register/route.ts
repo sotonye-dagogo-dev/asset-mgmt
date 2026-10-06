@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { hashPassword, generateToken, setAuthCookie } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export async function POST(request: NextRequest) {
   try {

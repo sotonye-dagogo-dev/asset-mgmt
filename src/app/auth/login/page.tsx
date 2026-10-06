@@ -41,7 +41,11 @@ function LoginFormComponent() {
       const result = await res.json()
       
       if (!res.ok) {
-        setError(result.error || 'Login failed')
+        if (result.code === 'DB_UNAVAILABLE') {
+          setError('Cannot reach the database. Please check the connection configuration and try again. (DB_UNAVAILABLE)')
+        } else {
+          setError(result.error || 'Login failed')
+        }
         return
       }
       
