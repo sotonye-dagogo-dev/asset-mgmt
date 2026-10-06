@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { verifyToken } from '@/lib/auth'
 import { createAuditLog } from '@/lib/audit'
 import { AuditAction } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 async function getUser(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
@@ -13,10 +17,18 @@ async function getUser(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const user = await getUser(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  const types = await prisma.accessoryType.findMany({ orderBy: { name: 'asc' } })
-  return NextResponse.json({ accessoryTypes: types })
+  try {
+    const user = await getUser(request)
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    const types = await prisma.accessoryType.findMany({ orderBy: { name: 'asc' } })
+    return NextResponse.json({ accessoryTypes: types })
+  } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
+    console.error('GET ' + 'accessories error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+  }
 }
 
 export async function POST(request: NextRequest) {

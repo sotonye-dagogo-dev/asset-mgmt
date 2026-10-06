@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { verifyPassword, generateToken, setAuthCookie } from '@/lib/auth'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export async function POST(request: NextRequest) {
   try {
@@ -61,6 +65,9 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error('Login error:', error)
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

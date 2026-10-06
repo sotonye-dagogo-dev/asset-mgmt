@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { verifyToken } from '@/lib/auth'
 import { createAuditLog } from '@/lib/audit'
 import { AuditAction } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 async function getUser(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
@@ -16,40 +20,48 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const user = await getUser(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const user = await getUser(request)
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   
-  const { id } = await params
+    const { id } = await params
   
-  // Users can view their own profile, admins can view all
-  if (user.id !== id && !['SUPERADMIN', 'ADMIN', 'HR_HEAD', 'HR_OFFICER'].includes(user.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    // Users can view their own profile, admins can view all
+    if (user.id !== id && !['SUPERADMIN', 'ADMIN', 'HR_HEAD', 'HR_OFFICER'].includes(user.role)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
+  
+    const targetUser = await prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        employeeId: true,
+        jobTitle: true,
+        department: true,
+        role: true,
+        campus: true,
+        isActive: true,
+        createdAt: true,
+        lastLoginAt: true,
+        supervisor: { select: { id: true, firstName: true, lastName: true } },
+        subordinates: { select: { id: true, firstName: true, lastName: true, role: true } },
+        assignedAssets: { select: { id: true, assetId: true, name: true, status: true } },
+      },
+    })
+  
+    if (!targetUser) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+  
+    return NextResponse.json({ user: targetUser })
+  } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
+    console.error('GET ' + '[id] error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-  
-  const targetUser = await prisma.user.findUnique({
-    where: { id },
-    select: {
-      id: true,
-      email: true,
-      firstName: true,
-      lastName: true,
-      employeeId: true,
-      jobTitle: true,
-      department: true,
-      role: true,
-      campus: true,
-      isActive: true,
-      createdAt: true,
-      lastLoginAt: true,
-      supervisor: { select: { id: true, firstName: true, lastName: true } },
-      subordinates: { select: { id: true, firstName: true, lastName: true, role: true } },
-      assignedAssets: { select: { id: true, assetId: true, name: true, status: true } },
-    },
-  })
-  
-  if (!targetUser) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-  
-  return NextResponse.json({ user: targetUser })
 }
 
 export async function PATCH(
@@ -114,6 +126,9 @@ export async function PATCH(
     return NextResponse.json({ user: updatedUser })
   } catch (error) {
     console.error('Update user error:', error)
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
@@ -122,36 +137,44 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const user = await getUser(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const user = await getUser(request)
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   
-  if (!['SUPERADMIN', 'ADMIN'].includes(user.role)) {
-    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    if (!['SUPERADMIN', 'ADMIN'].includes(user.role)) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
+  
+    const { id } = await params
+  
+    if (id === user.id) {
+      return NextResponse.json({ error: 'Cannot delete yourself' }, { status: 400 })
+    }
+  
+    const targetUser = await prisma.user.findUnique({ where: { id } })
+    if (!targetUser) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+  
+    // Soft delete - deactivate
+    await prisma.user.update({
+      where: { id },
+      data: { isActive: false },
+    })
+  
+    await createAuditLog({
+      actorId: user.id,
+      action: AuditAction.DELETE,
+      entityType: 'User',
+      entityId: id,
+      beforeState: targetUser,
+      description: `Deactivated user ${targetUser.email}`,
+    })
+  
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
+    console.error('DELETE ' + '[id] error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-  
-  const { id } = await params
-  
-  if (id === user.id) {
-    return NextResponse.json({ error: 'Cannot delete yourself' }, { status: 400 })
-  }
-  
-  const targetUser = await prisma.user.findUnique({ where: { id } })
-  if (!targetUser) return NextResponse.json({ error: 'User not found' }, { status: 404 })
-  
-  // Soft delete - deactivate
-  await prisma.user.update({
-    where: { id },
-    data: { isActive: false },
-  })
-  
-  await createAuditLog({
-    actorId: user.id,
-    action: AuditAction.DELETE,
-    entityType: 'User',
-    entityId: id,
-    beforeState: targetUser,
-    description: `Deactivated user ${targetUser.email}`,
-  })
-  
-  return NextResponse.json({ success: true })
 }

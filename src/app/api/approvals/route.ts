@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
+import { isDatabaseUnavailableError, databaseUnavailableResponse } from '@/lib/db-errors'
 import { verifyToken } from '@/lib/auth'
 import { createAuditLog } from '@/lib/audit'
 import { AuditAction } from '@prisma/client'
+
+export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 async function getUser(request: NextRequest) {
   const token = request.cookies.get('auth-token')?.value
@@ -13,40 +17,48 @@ async function getUser(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
-  const user = await getUser(request)
-  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  try {
+    const user = await getUser(request)
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   
-  const { searchParams } = new URL(request.url)
-  const page = parseInt(searchParams.get('page') || '1')
-  const pageSize = parseInt(searchParams.get('pageSize') || '25')
-  const status = searchParams.get('status')
-  const type = searchParams.get('type')
+    const { searchParams } = new URL(request.url)
+    const page = parseInt(searchParams.get('page') || '1')
+    const pageSize = parseInt(searchParams.get('pageSize') || '25')
+    const status = searchParams.get('status')
+    const type = searchParams.get('type')
   
-  const where: Record<string, unknown> = {}
-  if (status) where.status = status
-  if (type) where.type = type
+    const where: Record<string, unknown> = {}
+    if (status) where.status = status
+    if (type) where.type = type
   
-  // Non-admins see only their approvals
-  if (!['SUPERADMIN', 'ADMIN', 'HR_HEAD', 'HR_OFFICER', 'COMPLIANCE_HEAD', 'COMPLIANCE_OFFICER'].includes(user.role)) {
-    where.requesterId = user.id
+    // Non-admins see only their approvals
+    if (!['SUPERADMIN', 'ADMIN', 'HR_HEAD', 'HR_OFFICER', 'COMPLIANCE_HEAD', 'COMPLIANCE_OFFICER'].includes(user.role)) {
+      where.requesterId = user.id
+    }
+  
+    const [approvals, total] = await Promise.all([
+      prisma.approval.findMany({
+        where,
+        include: {
+          requester: { select: { id: true, firstName: true, lastName: true, email: true, department: true } },
+          asset: { select: { id: true, assetId: true, name: true, category: true } },
+          currentApprover: { select: { id: true, firstName: true, lastName: true, email: true } },
+        },
+        orderBy: { requestedAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.approval.count({ where }),
+    ])
+  
+    return NextResponse.json({ approvals, total, page, pageSize })
+  } catch (error) {
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
+    console.error('GET ' + 'approvals error:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
-  
-  const [approvals, total] = await Promise.all([
-    prisma.approval.findMany({
-      where,
-      include: {
-        requester: { select: { id: true, firstName: true, lastName: true, email: true, department: true } },
-        asset: { select: { id: true, assetId: true, name: true, category: true } },
-        currentApprover: { select: { id: true, firstName: true, lastName: true, email: true } },
-      },
-      orderBy: { requestedAt: 'desc' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    }),
-    prisma.approval.count({ where }),
-  ])
-  
-  return NextResponse.json({ approvals, total, page, pageSize })
 }
 
 export async function POST(request: NextRequest) {
@@ -88,6 +100,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ approval }, { status: 201 })
   } catch (error) {
     console.error('Create approval error:', error)
+    if (isDatabaseUnavailableError(error)) {
+      return databaseUnavailableResponse(error)
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
